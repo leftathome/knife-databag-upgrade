@@ -46,17 +46,20 @@ module DataBagUpgrade
 # cribbed from Chef::Knife::DataBagEdit
       def load_item(bag, item_name)
         item = Chef::DataBagItem.load(bag, item_name)
+        File.open(File.join(config[:backup_dir], bag, "#{item_name}-old.json"), "w") do |dbag_file|
+          dbag_file.print(item.raw_data)
+        end
         if use_encryption
           begin
-            Chef::EncryptedDataBagItem.new(item, read_secret).to_hash
+            [Chef::EncryptedDataBagItem.new(item, read_secret).to_hash, true]
           rescue NoMethodError
             ui.info "Looks like #{bag}::#{item_name} isn't encrypted?"
-            item
+            [item, false]
           rescue OpenSSL::Cipher::CipherError
             ui.warn "Looks like #{bag}::#{item_name} was encrypted, but with a different key!"
           end
         else
-          item
+          [item, false]
         end
       end
 
@@ -75,11 +78,12 @@ module DataBagUpgrade
         FileUtils.mkdir_p(File.join(dir, bag_name))
         Chef::DataBag.load(bag_name).each do |item_name, url|
           ui.msg "Examining data bag #{bag_name} item #{item_name}"
-          item = load_item(bag_name,item_name)
+          (item, is_encrypted) = load_item(bag_name,item_name)
+	  puts "encrypted!" if is_encrypted
           # back up the old version before we start messing with it.
           begin
-            File.open(File.join(dir, bag_name, "#{item_name}-old.json"), "w") do |dbag_file|
-              dbag_file.print(item.to_json)
+            File.open(File.join(dir, bag_name, "#{item_name}-clear.json"), "w") do |dbag_file|
+              dbag_file.print(item.raw_data)
             end
           rescue NoMethodError
             ui.warn "Refusing to back up unreadable object data_bag_item[#{bag_name}::#{item_name}] ..."
@@ -88,8 +92,9 @@ module DataBagUpgrade
           dbag.data_bag(bag_name)
           begin
             dbag.raw_data = item
+	    dbag.raw_data = Chef::EncryptedDataBagItem.encrypt_data_bag_item(dbag.raw_data,read_secret) if is_encrypted
             File.open(File.join(dir, bag_name, "#{item_name}-new.json"), "w") do |dbag_file|
-              dbag_file.print(dbag.raw_data.to_json)
+              dbag_file.print(dbag.raw_data)
             end
           rescue Chef::Exceptions::ValidationFailed
             ui.warn "Will not update invalid object data_bag_item[#{dbag.data_bag}::#{item_name}] ... check upstream for errors"
@@ -98,10 +103,6 @@ module DataBagUpgrade
           ui.info("Would save: #{dbag.raw_data.inspect}")
           #dbag.save
           ui.info("Updated data_bag_item[#{dbag.data_bag}::#{dbag.id}]")
-          
-          #File.open(File.join(dir, bag_name, "#{item_name}.json"), "w") do |dbag_file|
-          #  dbag_file.print(item.raw_data.to_json)
-          #end
         end
       end
     end
